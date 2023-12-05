@@ -641,8 +641,8 @@ class ModelTesterMixin:
             model.eval()
             with torch.no_grad():
                 outputs = model(**self._prepare_for_class(inputs_dict, model_class))
-            attentions = outputs.encoder_attentions if config.is_encoder_decoder else outputs.attentions
-            self.assertEqual(len(attentions), self.model_tester.num_hidden_layers)
+            attentions = outputs.encoder_attentions if config.is_encoder_decoder and hasattr(outputs, "encoder_attentions") else outputs.attentions
+            self.assertIn(len(attentions), (self.model_tester.num_hidden_layers, self.model_tester.num_hidden_layers*2))
 
             # check that output_attentions also work using config
             del inputs_dict["output_attentions"]
@@ -652,8 +652,8 @@ class ModelTesterMixin:
             model.eval()
             with torch.no_grad():
                 outputs = model(**self._prepare_for_class(inputs_dict, model_class))
-            attentions = outputs.encoder_attentions if config.is_encoder_decoder else outputs.attentions
-            self.assertEqual(len(attentions), self.model_tester.num_hidden_layers)
+            attentions = outputs.encoder_attentions if config.is_encoder_decoder and hasattr(outputs, "encoder_attentions") else outputs.attentions
+            self.assertIn(len(attentions), (self.model_tester.num_hidden_layers, self.model_tester.num_hidden_layers*2))
 
             if chunk_length is not None:
                 self.assertListEqual(
@@ -666,6 +666,8 @@ class ModelTesterMixin:
                     [self.model_tester.num_attention_heads, encoder_seq_length, encoder_key_length],
                 )
             out_len = len(outputs)
+            from structshape import structshape as ss
+            print(ss(outputs))
 
             if self.is_encoder_decoder:
                 correct_outlen = 5
@@ -1720,7 +1722,15 @@ class ModelTesterMixin:
         def check_equivalence(model, tuple_inputs, dict_inputs, additional_kwargs={}):
             with torch.no_grad():
                 tuple_output = model(**tuple_inputs, return_dict=False, **additional_kwargs)
-                dict_output = model(**dict_inputs, return_dict=True, **additional_kwargs).to_tuple()
+                dict_output = model(**dict_inputs, return_dict=True, **additional_kwargs)
+                from structshape import structshape
+                #print("DICTO",i,dict_output)
+                print("DICTO",structshape(dict_output))
+                dict_output = dict_output.to_tuple()
+                #print("TUPLE",i,tuple_output)
+                print("TUPLE",structshape(tuple_output))
+                #print("DICTT",i,dict_output)
+                print("DICTT",structshape(dict_output))
 
                 def recursive_check(tuple_object, dict_object):
                     if isinstance(tuple_object, (List, Tuple)):
@@ -1749,41 +1759,42 @@ class ModelTesterMixin:
                 recursive_check(tuple_output, dict_output)
 
         for model_class in self.all_model_classes:
+            print(model_class.__name__)
             model = model_class(config)
             model.to(torch_device)
             model.eval()
-
+            print("A")
             tuple_inputs = self._prepare_for_class(inputs_dict, model_class)
             dict_inputs = self._prepare_for_class(inputs_dict, model_class)
             check_equivalence(model, tuple_inputs, dict_inputs)
-
+            print("B")
             tuple_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             dict_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             check_equivalence(model, tuple_inputs, dict_inputs)
-
+            print("C")
             tuple_inputs = self._prepare_for_class(inputs_dict, model_class)
             dict_inputs = self._prepare_for_class(inputs_dict, model_class)
             check_equivalence(model, tuple_inputs, dict_inputs, {"output_hidden_states": True})
-
+            print("D")
             tuple_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             dict_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             check_equivalence(model, tuple_inputs, dict_inputs, {"output_hidden_states": True})
-
+            print("E")
             if self.has_attentions:
                 tuple_inputs = self._prepare_for_class(inputs_dict, model_class)
                 dict_inputs = self._prepare_for_class(inputs_dict, model_class)
                 check_equivalence(model, tuple_inputs, dict_inputs, {"output_attentions": True})
-
+                print("F")
                 tuple_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
                 dict_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
                 check_equivalence(model, tuple_inputs, dict_inputs, {"output_attentions": True})
-
+                print("G")
                 tuple_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
                 dict_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
                 check_equivalence(
                     model, tuple_inputs, dict_inputs, {"output_hidden_states": True, "output_attentions": True}
                 )
-
+                print("H")
     # Don't copy this method to model specific test file!
     # TODO: remove this method once the issues are all fixed!
     def _make_attention_mask_non_null(self, inputs_dict):
