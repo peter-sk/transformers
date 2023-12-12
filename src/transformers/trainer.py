@@ -2340,6 +2340,9 @@ class Trainer:
         if self.hp_search_backend is None and trial is None:
             self.store_flos()
 
+        if not self.args.should_save:
+                    return
+
         run_dir = self._get_output_dir(trial=trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
         if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0:
@@ -2375,8 +2378,7 @@ class Trainer:
                 self.state.best_model_checkpoint = output_dir
 
         # Save the Trainer state
-        if self.args.should_save:
-            self.state.save_to_json(os.path.join(staging_output_dir, TRAINER_STATE_NAME))
+        self.state.save_to_json(os.path.join(staging_output_dir, TRAINER_STATE_NAME))
 
         if self.args.push_to_hub:
             self._push_from_checkpoint(staging_output_dir)
@@ -2386,8 +2388,7 @@ class Trainer:
             os.rename(staging_output_dir, output_dir)
 
         # Maybe delete some older checkpoints.
-        if self.args.should_save:
-            self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
+        self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
 
     def _save_rng_state(self, output_dir):
         # Save RNG state in non-distributed training
