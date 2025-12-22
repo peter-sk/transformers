@@ -134,6 +134,7 @@ if TYPE_CHECKING:
     from .fastspeech2_conformer import *
     from .flaubert import *
     from .flava import *
+    from .flex_more import *
     from .flex_olmo import *
     from .florence2 import *
     from .fnet import *
