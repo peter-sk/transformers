@@ -18,15 +18,18 @@ from typing import Optional
 import torch
 from torch import nn
 
+from ... import initialization as init
+from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
 from ...configuration_utils import PreTrainedConfig
 from ...masking_utils import create_causal_mask
 from ...modeling_outputs import MoeModelOutputWithPast
 from ...modeling_rope_utils import RopeParameters
+from ...modeling_utils import PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring
 from ...utils.generic import OutputRecorder, check_model_inputs
-from ..mixtral.modeling_mixtral import MixtralModel, MixtralPreTrainedModel
+from ..mixtral.modeling_mixtral import MixtralModel
 from ..olmo2.modeling_olmo2 import Olmo2Attention, Olmo2RMSNorm, Olmo2RotaryEmbedding
 from ..olmoe.modeling_olmoe import (
     OlmoeDecoderLayer,
@@ -219,17 +222,27 @@ class FlexMoREAttention(Olmo2Attention):
     pass
 
 
-class FlexMoREExperts(nn.Module):
-    """Collection of expert weights stored as 3D tensors."""
+class FlexMoREExpert(nn.Module):
+    """Single expert."""
 
     def __init__(self, config: FlexMoREConfig):
         super().__init__()
-        self.num_experts = config.num_local_experts
-        self.hidden_dim = config.hidden_size
-        self.intermediate_dim = config.intermediate_size
-        self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, 2 * self.intermediate_dim, self.hidden_dim))
-        self.down_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim, self.intermediate_dim))
+        hidden_dim = config.hidden_size
+        intermediate_dim = config.intermediate_size
+        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(self.act_fn(gate) * up)
+
+class FlexMoREExperts(nn.ModuleList):
+    """Collection of experts."""
+
+    def __init__(self, config: FlexMoREConfig):
+        super().__init__([FlexMoREExpert(config) for _ in range(config.num_local_experts)])
 
     def forward(
         self,
@@ -239,19 +252,17 @@ class FlexMoREExperts(nn.Module):
     ) -> torch.Tensor:
         final_hidden_states = torch.zeros_like(hidden_states)
         with torch.no_grad():
-            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
+            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=len(self))
             expert_mask = expert_mask.permute(2, 1, 0)
             expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
 
         for expert_idx in expert_hit:
             expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts:
+            if expert_idx == len(self):
                 continue
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]
-            gate, up = nn.functional.linear(current_state, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
-            current_hidden_states = self.act_fn(gate) * up
-            current_hidden_states = nn.functional.linear(current_hidden_states, self.down_proj[expert_idx])
+            current_hidden_states = self[expert_idx](current_state)
             current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
 
@@ -320,15 +331,34 @@ class FlexMoREDecoderLayer(OlmoeDecoderLayer):
         hidden_states = residual + hidden_states
         return hidden_states
 
-
-# FlexMoRE uses Mixtral model as its base instead of OlmoE model since Mixtral is more up-to-date with the rest
-# of the transformers library. For example, it uses the newer mechanisms of recording submodule outputs.
-class FlexMoREPreTrainedModel(MixtralPreTrainedModel):
+@auto_docstring
+class FlexMoREPreTrainedModel(PreTrainedModel):
+    config: FlexMoREConfig
+    base_model_prefix = "model"
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["FlexMoREDecoderLayer"]
+    _skip_keys_device_placement = ["past_key_values"]
+    _supports_flash_attn = True
+    _supports_sdpa = True
+    _supports_flex_attn = True
+    _can_compile_fullgraph = False  # MoE models don't work with torch.compile (`torch.where(condition)` not supported)
+    _supports_attention_backend = True
     _can_record_outputs = {
         "router_logits": OutputRecorder(nn.Linear, layer_name="mlp.gate", index=0),
         "hidden_states": FlexMoREDecoderLayer,
         "attentions": FlexMoREAttention,
     }
+
+    @torch.no_grad()
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        std = self.config.initializer_range
+        if isinstance(module, FlexMoREExpert):
+            init.normal_(module.gate_proj, mean=0.0, std=std)
+            init.normal_(module.up_proj, mean=0.0, std=std)
+            init.normal_(module.down_proj, mean=0.0, std=std)
+        elif isinstance(module, FlexMoRETopKRouter):
+            init.normal_(module.weight, mean=0.0, std=std)
 
 
 # FlexMoRE uses Mixtral model as its base instead of OlmoE model since Mixtral is more up-to-date with the rest
