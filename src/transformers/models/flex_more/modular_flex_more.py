@@ -256,6 +256,7 @@ class FlexMoREExpert(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
         self.rank = rank
         self.base_expert = None
+        self._cache = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.rank > 0:
@@ -264,8 +265,10 @@ class FlexMoREExpert(nn.Module):
             up = self.up_proj_b(self.up_proj_a(x))
             expert_output = self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
             return base_output + expert_output
-        gate, up = self.gate_proj(x), self.up_proj(x)
-        return self.down_proj(self.act_fn(gate) * up)
+        if self._cache is None:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+            self._cache = self.down_proj(self.act_fn(gate) * up)
+        return self._cache
 
 class FlexMoREExperts(nn.ModuleList):
     """Collection of experts."""
@@ -275,6 +278,15 @@ class FlexMoREExperts(nn.ModuleList):
         for expert, base in zip(self, config.expert_bases):
             if expert.rank > 0:
                 expert.base_expert = weakref.ref(self[base])
+
+    def _get_dense(self, expert_hit: torch.Tensor) -> list[FlexMoREExpert]:
+        dense_experts = []
+        for expert_idx in expert_hit:
+            expert = self[expert_idx]
+            while expert.rank > 0:
+                expert = expert.base_expert()
+            dense_experts.append(expert)
+        return dense_experts
 
     def forward(
         self,
@@ -297,6 +309,8 @@ class FlexMoREExperts(nn.ModuleList):
             current_hidden_states = self[expert_idx](current_state)
             current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
+        for expert in self._get_dense(expert_hit):
+            expert._cache = None
 
         return final_hidden_states
 
