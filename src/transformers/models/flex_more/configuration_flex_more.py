@@ -89,6 +89,9 @@ class FlexMoREConfig(PreTrainedConfig):
         expert_ranks ('list of int', *optional*):
             List of expert ranks for mixture of experts layers. If not provided, all experts will have
             rank 0, i.e., all experts are dense.
+        expert_bases ('list of int', *optional*):
+            List of expert bases for mixture of experts layers. If not provided, all experts will have
+            base 0, i.e., they refer to expert 0 as their base expert.
         output_router_logits (`bool`, *optional*, defaults to `False`):
             Whether or not the router logits should be returned by the model. Enabling this will also
             allow the model to output the auxiliary loss, including load balancing loss and router z-loss.
@@ -152,6 +155,7 @@ class FlexMoREConfig(PreTrainedConfig):
         num_experts_per_tok: Optional[int] = 5,
         num_experts: Optional[int] = 7,
         expert_ranks: Optional[list[int]] = None,
+        expert_bases: Optional[list[int]] = None,
         output_router_logits: Optional[bool] = False,
         router_aux_loss_coef: Optional[float] = 0.01,
         norm_topk_prob: Optional[bool] = False,
@@ -179,6 +183,8 @@ class FlexMoREConfig(PreTrainedConfig):
         self.num_experts = num_experts
         self.expert_ranks = expert_ranks if expert_ranks is not None else [0] * num_experts
         assert len(self.expert_ranks) == self.num_experts, "Length of expert_ranks must be equal to num_experts"
+        self.expert_bases = expert_bases if expert_bases is not None else [0] * num_experts
+        assert len(self.expert_bases) == self.num_experts, "Length of expert_bases must be equal to num_experts"
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.norm_topk_prob = norm_topk_prob

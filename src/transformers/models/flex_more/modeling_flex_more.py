@@ -19,6 +19,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import weakref
 from collections.abc import Callable
 from typing import Optional, Union
 
@@ -313,12 +314,15 @@ class FlexMoREExpert(nn.Module):
             self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
         self.rank = rank
+        self.base_expert = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.rank > 0:
+            base_output = self.base_expert()(x)
             gate = self.gate_proj_b(self.gate_proj_a(x))
             up = self.up_proj_b(self.up_proj_a(x))
-            return self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
+            expert_output = self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
+            return base_output + expert_output
         gate, up = self.gate_proj(x), self.up_proj(x)
         return self.down_proj(self.act_fn(gate) * up)
 
@@ -328,6 +332,9 @@ class FlexMoREExperts(nn.ModuleList):
 
     def __init__(self, config: FlexMoREConfig):
         super().__init__([FlexMoREExpert(config, rank) for rank in config.expert_ranks])
+        for expert, base in zip(self, config.expert_bases):
+            if expert.rank > 0:
+                expert.base_expert = weakref.ref(self[base])
 
     def forward(
         self,

@@ -17,6 +17,7 @@ from typing import Optional
 
 import torch
 from torch import nn
+import weakref
 
 from ... import initialization as init
 from ...activations import ACT2FN
@@ -103,6 +104,9 @@ class FlexMoREConfig(PreTrainedConfig):
         expert_ranks ('list of int', *optional*):
             List of expert ranks for mixture of experts layers. If not provided, all experts will have
             rank 0, i.e., all experts are dense.
+        expert_bases ('list of int', *optional*):
+            List of expert bases for mixture of experts layers. If not provided, all experts will have
+            base 0, i.e., they refer to expert 0 as their base expert.
         output_router_logits (`bool`, *optional*, defaults to `False`):
             Whether or not the router logits should be returned by the model. Enabling this will also
             allow the model to output the auxiliary loss, including load balancing loss and router z-loss.
@@ -166,6 +170,7 @@ class FlexMoREConfig(PreTrainedConfig):
         num_experts_per_tok: Optional[int] = 5,
         num_experts: Optional[int] = 7,
         expert_ranks: Optional[list[int]] = None,
+        expert_bases: Optional[list[int]] = None,
         output_router_logits: Optional[bool] = False,
         router_aux_loss_coef: Optional[float] = 0.01,
         norm_topk_prob: Optional[bool] = False,
@@ -193,6 +198,8 @@ class FlexMoREConfig(PreTrainedConfig):
         self.num_experts = num_experts
         self.expert_ranks = expert_ranks if expert_ranks is not None else [0] * num_experts
         assert len(self.expert_ranks) == self.num_experts, "Length of expert_ranks must be equal to num_experts"
+        self.expert_bases = expert_bases if expert_bases is not None else [0] * num_experts
+        assert len(self.expert_bases) == self.num_experts, "Length of expert_bases must be equal to num_experts"
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.norm_topk_prob = norm_topk_prob
@@ -248,12 +255,15 @@ class FlexMoREExpert(nn.Module):
             self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
         self.rank = rank
+        self.base_expert = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.rank > 0:
+            base_output = self.base_expert()(x)
             gate = self.gate_proj_b(self.gate_proj_a(x))
             up = self.up_proj_b(self.up_proj_a(x))
-            return self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
+            expert_output = self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
+            return base_output + expert_output
         gate, up = self.gate_proj(x), self.up_proj(x)
         return self.down_proj(self.act_fn(gate) * up)
 
@@ -262,6 +272,9 @@ class FlexMoREExperts(nn.ModuleList):
 
     def __init__(self, config: FlexMoREConfig):
         super().__init__([FlexMoREExpert(config, rank) for rank in config.expert_ranks])
+        for expert, base in zip(self, config.expert_bases):
+            if expert.rank > 0:
+                expert.base_expert = weakref.ref(self[base])
 
     def forward(
         self,
