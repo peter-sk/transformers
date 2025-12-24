@@ -296,16 +296,29 @@ class FlexMoREAttention(nn.Module):
 class FlexMoREExpert(nn.Module):
     """Single expert."""
 
-    def __init__(self, config: FlexMoREConfig):
+    def __init__(self, config: FlexMoREConfig, rank: int):
         super().__init__()
         hidden_dim = config.hidden_size
         intermediate_dim = config.intermediate_size
-        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
-        self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
-        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
+        if rank > 0:
+            self.gate_proj_a = nn.Linear(hidden_dim, rank, bias=False)
+            self.gate_proj_b = nn.Linear(rank, intermediate_dim, bias=False)
+            self.up_proj_a = nn.Linear(hidden_dim, rank, bias=False)
+            self.up_proj_b = nn.Linear(rank, intermediate_dim, bias=False)
+            self.down_proj_a = nn.Linear(intermediate_dim, rank, bias=False)
+            self.down_proj_b = nn.Linear(rank, hidden_dim, bias=False)
+        else:
+            self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+            self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+            self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.rank = rank
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            gate = self.gate_proj_b(self.gate_proj_a(x))
+            up = self.up_proj_b(self.up_proj_a(x))
+            return self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
         gate, up = self.gate_proj(x), self.up_proj(x)
         return self.down_proj(self.act_fn(gate) * up)
 
@@ -314,7 +327,7 @@ class FlexMoREExperts(nn.ModuleList):
     """Collection of experts."""
 
     def __init__(self, config: FlexMoREConfig):
-        super().__init__([FlexMoREExpert(config) for _ in range(config.num_local_experts)])
+        super().__init__([FlexMoREExpert(config, rank) for rank in config.expert_ranks])
 
     def forward(
         self,
@@ -443,9 +456,17 @@ class FlexMoREPreTrainedModel(PreTrainedModel):
         super()._init_weights(module)
         std = self.config.initializer_range
         if isinstance(module, FlexMoREExpert):
-            init.normal_(module.gate_proj, mean=0.0, std=std)
-            init.normal_(module.up_proj, mean=0.0, std=std)
-            init.normal_(module.down_proj, mean=0.0, std=std)
+            if module.rank > 0:
+                init.normal_(module.gate_proj_a, mean=0.0, std=std)
+                init.normal_(module.gate_proj_b, mean=0.0, std=std)
+                init.normal_(module.up_proj_a, mean=0.0, std=std)
+                init.normal_(module.up_proj_b, mean=0.0, std=std)
+                init.normal_(module.down_proj_a, mean=0.0, std=std)
+                init.normal_(module.down_proj_b, mean=0.0, std=std)
+            else:
+                init.normal_(module.gate_proj, mean=0.0, std=std)
+                init.normal_(module.up_proj, mean=0.0, std=std)
+                init.normal_(module.down_proj, mean=0.0, std=std)
         elif isinstance(module, FlexMoRETopKRouter):
             init.normal_(module.weight, mean=0.0, std=std)
 

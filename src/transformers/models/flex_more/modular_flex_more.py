@@ -100,6 +100,9 @@ class FlexMoREConfig(PreTrainedConfig):
             Number of selected experts.
         num_experts (`int`, *optional*, defaults to 7):
             Number of routed experts.
+        expert_ranks ('list of int', *optional*):
+            List of expert ranks for mixture of experts layers. If not provided, all experts will have
+            rank 0, i.e., all experts are dense.
         output_router_logits (`bool`, *optional*, defaults to `False`):
             Whether or not the router logits should be returned by the model. Enabling this will also
             allow the model to output the auxiliary loss, including load balancing loss and router z-loss.
@@ -162,6 +165,7 @@ class FlexMoREConfig(PreTrainedConfig):
         attention_dropout: Optional[float] = 0.0,
         num_experts_per_tok: Optional[int] = 5,
         num_experts: Optional[int] = 7,
+        expert_ranks: Optional[list[int]] = None,
         output_router_logits: Optional[bool] = False,
         router_aux_loss_coef: Optional[float] = 0.01,
         norm_topk_prob: Optional[bool] = False,
@@ -187,6 +191,8 @@ class FlexMoREConfig(PreTrainedConfig):
         self.attention_dropout = attention_dropout
         self.num_experts_per_tok = num_experts_per_tok
         self.num_experts = num_experts
+        self.expert_ranks = expert_ranks if expert_ranks is not None else [0] * num_experts
+        assert len(self.expert_ranks) == self.num_experts, "Length of expert_ranks must be equal to num_experts"
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.norm_topk_prob = norm_topk_prob
@@ -225,16 +231,29 @@ class FlexMoREAttention(Olmo2Attention):
 class FlexMoREExpert(nn.Module):
     """Single expert."""
 
-    def __init__(self, config: FlexMoREConfig):
+    def __init__(self, config: FlexMoREConfig, rank: int):
         super().__init__()
         hidden_dim = config.hidden_size
         intermediate_dim = config.intermediate_size
-        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
-        self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
-        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
+        if rank > 0:
+            self.gate_proj_a = nn.Linear(hidden_dim, rank, bias=False)
+            self.gate_proj_b = nn.Linear(rank, intermediate_dim, bias=False)
+            self.up_proj_a = nn.Linear(hidden_dim, rank, bias=False)
+            self.up_proj_b = nn.Linear(rank, intermediate_dim, bias=False)
+            self.down_proj_a = nn.Linear(intermediate_dim, rank, bias=False)
+            self.down_proj_b = nn.Linear(rank, hidden_dim, bias=False)
+        else:
+            self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+            self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+            self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.rank = rank
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            gate = self.gate_proj_b(self.gate_proj_a(x))
+            up = self.up_proj_b(self.up_proj_a(x))
+            return self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
         gate, up = self.gate_proj(x), self.up_proj(x)
         return self.down_proj(self.act_fn(gate) * up)
 
@@ -242,7 +261,7 @@ class FlexMoREExperts(nn.ModuleList):
     """Collection of experts."""
 
     def __init__(self, config: FlexMoREConfig):
-        super().__init__([FlexMoREExpert(config) for _ in range(config.num_local_experts)])
+        super().__init__([FlexMoREExpert(config, rank) for rank in config.expert_ranks])
 
     def forward(
         self,
@@ -354,9 +373,17 @@ class FlexMoREPreTrainedModel(PreTrainedModel):
         super()._init_weights(module)
         std = self.config.initializer_range
         if isinstance(module, FlexMoREExpert):
-            init.normal_(module.gate_proj, mean=0.0, std=std)
-            init.normal_(module.up_proj, mean=0.0, std=std)
-            init.normal_(module.down_proj, mean=0.0, std=std)
+            if module.rank > 0:
+                init.normal_(module.gate_proj_a, mean=0.0, std=std)
+                init.normal_(module.gate_proj_b, mean=0.0, std=std)
+                init.normal_(module.up_proj_a, mean=0.0, std=std)
+                init.normal_(module.up_proj_b, mean=0.0, std=std)
+                init.normal_(module.down_proj_a, mean=0.0, std=std)
+                init.normal_(module.down_proj_b, mean=0.0, std=std)
+            else:
+                init.normal_(module.gate_proj, mean=0.0, std=std)
+                init.normal_(module.up_proj, mean=0.0, std=std)
+                init.normal_(module.down_proj, mean=0.0, std=std)
         elif isinstance(module, FlexMoRETopKRouter):
             init.normal_(module.weight, mean=0.0, std=std)
 
