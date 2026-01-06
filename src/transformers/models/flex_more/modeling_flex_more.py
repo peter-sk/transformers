@@ -297,7 +297,7 @@ class FlexMoREAttention(nn.Module):
 class FlexMoREExpert(nn.Module):
     """Single expert."""
 
-    def __init__(self, config: FlexMoREConfig, rank: int):
+    def __init__(self, config: FlexMoREConfig, rank: int, alpha: float):
         super().__init__()
         hidden_dim = config.hidden_size
         intermediate_dim = config.intermediate_size
@@ -308,6 +308,7 @@ class FlexMoREExpert(nn.Module):
             self.up_proj_b = nn.Linear(rank, intermediate_dim, bias=False)
             self.down_proj_a = nn.Linear(intermediate_dim, rank, bias=False)
             self.down_proj_b = nn.Linear(rank, hidden_dim, bias=False)
+            self.scaling = alpha / rank
         else:
             self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
             self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
@@ -315,38 +316,50 @@ class FlexMoREExpert(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
         self.rank = rank
         self.base_expert = None
-        self._cache = None
+
+    def _gate_project(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            base = self.base_expert()
+            return base._gate_project(x) + self.scaling * self.gate_proj_b(self.gate_proj_a(x))
+        return self.gate_proj(x)
+
+    def _up_project(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            base = self.base_expert()
+            return base._up_project(x) + self.scaling * self.up_proj_b(self.up_proj_a(x))
+        return self.up_proj(x)
+
+    def _down_project(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            base = self.base_expert()
+            return base._down_project(x) + self.scaling * self.down_proj_b(self.down_proj_a(x))
+        return self.down_proj(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.rank > 0:
-            base_output = self.base_expert()(x)
-            gate = self.gate_proj_b(self.gate_proj_a(x))
-            up = self.up_proj_b(self.up_proj_a(x))
-            expert_output = self.down_proj_b(self.down_proj_a(self.act_fn(gate) * up))
-            return base_output + expert_output
-        if self._cache is None:
-            gate, up = self.gate_proj(x), self.up_proj(x)
-            self._cache = self.down_proj(self.act_fn(gate) * up)
-        return self._cache
+        gate = self._gate_project(x)
+        up = self._up_project(x)
+        h = self.act_fn(gate) * up
+        return self._down_project(h)
 
 
 class FlexMoREExperts(nn.ModuleList):
     """Collection of experts."""
 
     def __init__(self, config: FlexMoREConfig):
-        super().__init__([FlexMoREExpert(config, rank) for rank in config.expert_ranks])
+        super().__init__(
+            [FlexMoREExpert(config, rank, alpha) for rank, alpha in zip(config.expert_ranks, config.expert_alphas)]
+        )
         for expert, base in zip(self, config.expert_bases):
             if expert.rank > 0:
                 expert.base_expert = weakref.ref(self[base])
-
-    def _get_dense(self, expert_hit: torch.Tensor) -> list[FlexMoREExpert]:
-        dense_experts = []
-        for expert_idx in expert_hit:
-            expert = self[expert_idx]
+        # valiudate that there is no circular dependency in expert bases
+        for expert in self:
+            visited = set()
             while expert.rank > 0:
+                if id(expert) in visited:
+                    raise ValueError("Circular dependency detected in expert bases")
+                visited.add(id(expert))
                 expert = expert.base_expert()
-            dense_experts.append(expert)
-        return dense_experts
 
     def forward(
         self,
@@ -369,8 +382,6 @@ class FlexMoREExperts(nn.ModuleList):
             current_hidden_states = self[expert_idx](current_state)
             current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
-        for expert in self._get_dense(expert_hit):
-            expert._cache = None
 
         return final_hidden_states
 

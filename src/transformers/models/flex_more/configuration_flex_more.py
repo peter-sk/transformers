@@ -89,6 +89,9 @@ class FlexMoREConfig(PreTrainedConfig):
         expert_ranks ('list of int', *optional*):
             List of expert ranks for mixture of experts layers. If not provided, all experts will have
             rank 0, i.e., all experts are dense.
+        expert_alphas ('list of float', *optional*):
+            List of expert alphas for mixture of experts layers. Effective scale will be computed as alpha / rank.
+            If not provided, all experts will have alpha equal to their rank, i.e., scale will be 1.0 for all experts.
         expert_bases ('list of int', *optional*):
             List of expert bases for mixture of experts layers. If not provided, all experts will have
             base 0, i.e., they refer to expert 0 as their base expert.
@@ -155,6 +158,7 @@ class FlexMoREConfig(PreTrainedConfig):
         num_experts_per_tok: Optional[int] = 5,
         num_experts: Optional[int] = 7,
         expert_ranks: Optional[list[int]] = None,
+        expert_alphas: Optional[list[float]] = None,
         expert_bases: Optional[list[int]] = None,
         output_router_logits: Optional[bool] = False,
         router_aux_loss_coef: Optional[float] = 0.01,
@@ -183,6 +187,10 @@ class FlexMoREConfig(PreTrainedConfig):
         self.num_experts = num_experts
         self.expert_ranks = expert_ranks if expert_ranks is not None else [0] * num_experts
         assert len(self.expert_ranks) == self.num_experts, "Length of expert_ranks must be equal to num_experts"
+        self.expert_alphas = (
+            expert_alphas if expert_alphas is not None else [float(rank) for rank in self.expert_ranks]
+        )
+        assert len(self.expert_alphas) == self.num_experts, "Length of expert_alphas must be equal to num_experts"
         self.expert_bases = expert_bases if expert_bases is not None else [0] * num_experts
         assert len(self.expert_bases) == self.num_experts, "Length of expert_bases must be equal to num_experts"
         self.output_router_logits = output_router_logits
