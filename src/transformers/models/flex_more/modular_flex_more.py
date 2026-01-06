@@ -264,19 +264,29 @@ class FlexMoREExpert(nn.Module):
         self.rank = rank
         self.base_expert = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _gate_project(self, x: torch.Tensor) -> torch.Tensor:
         if self.rank > 0:
             base = self.base_expert()
-            # consider caching the base expert's projections
-            # requires restructuring of FlexMoREExperts.forward to group by base expert
-            gate = base.gate_proj(x) + self.scaling * self.gate_proj_b(self.gate_proj_a(x))
-            up = base.up_proj(x) + self.scaling * self.up_proj_b(self.up_proj_a(x))
-            h = self.act_fn(gate) * up
-            return base.down_proj(h) + self.scaling * self.down_proj_b(self.down_proj_a(h))
-        gate = self.gate_proj(x)
-        up = self.up_proj(x)
+            return base._gate_project(x) + self.scaling * self.gate_proj_b(self.gate_proj_a(x))
+        return self.gate_proj(x)
+
+    def _up_project(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            base = self.base_expert()
+            return base._up_project(x) + self.scaling * self.up_proj_b(self.up_proj_a(x))
+        return self.up_proj(x)
+
+    def _down_project(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rank > 0:
+            base = self.base_expert()
+            return base._down_project(x) + self.scaling * self.down_proj_b(self.down_proj_a(x))
+        return self.down_proj(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self._gate_project(x)
+        up = self._up_project(x)
         h = self.act_fn(gate) * up
-        return self.down_proj(h)
+        return self._down_project(h)
 
 class FlexMoREExperts(nn.ModuleList):
     """Collection of experts."""
@@ -288,8 +298,15 @@ class FlexMoREExperts(nn.ModuleList):
         ])
         for expert, base in zip(self, config.expert_bases):
             if expert.rank > 0:
-                assert self[base].rank == 0, "Base expert must be dense (rank 0)"
                 expert.base_expert = weakref.ref(self[base])
+        # valiudate that there is no circular dependency in expert bases
+        for expert in self:
+            visited = set()
+            while expert.rank > 0:
+                if id(expert) in visited:
+                    raise ValueError("Circular dependency detected in expert bases")
+                visited.add(id(expert))
+                expert = expert.base_expert()
 
     def forward(
         self,
