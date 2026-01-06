@@ -299,7 +299,7 @@ class FlexMoREExperts(nn.ModuleList):
         for expert, base in zip(self, config.expert_bases):
             if expert.rank > 0:
                 expert.base_expert = weakref.ref(self[base])
-        # valiudate that there is no circular dependency in expert bases
+        # validate that there is no circular dependency in expert bases
         for expert in self:
             visited = set()
             while expert.rank > 0:
