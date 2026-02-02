@@ -110,6 +110,9 @@ class FlexMoREConfig(PreTrainedConfig):
         expert_bases ('list of int', *optional*):
             List of expert bases for mixture of experts layers. If not provided, all experts will have
             base 0, i.e., they refer to expert 0 as their base expert.
+        expert_status ('list of int', *optional*):
+            List of expert status for mixture of experts layers. If not provided, all experts will be active.
+            Status -1 means the expert is deactivated, status 0 means the expert is active, and status 1 means the expert is always on.
         output_router_logits (`bool`, *optional*, defaults to `False`):
             Whether or not the router logits should be returned by the model. Enabling this will also
             allow the model to output the auxiliary loss, including load balancing loss and router z-loss.
@@ -175,6 +178,7 @@ class FlexMoREConfig(PreTrainedConfig):
         expert_ranks: Optional[list[int]] = None,
         expert_alphas: Optional[list[float]] = None,
         expert_bases: Optional[list[int]] = None,
+        expert_status: Optional[list[int]] = None,
         output_router_logits: Optional[bool] = False,
         router_aux_loss_coef: Optional[float] = 0.01,
         norm_topk_prob: Optional[bool] = False,
@@ -206,6 +210,8 @@ class FlexMoREConfig(PreTrainedConfig):
         assert len(self.expert_alphas) == self.num_experts, "Length of expert_alphas must be equal to num_experts"
         self.expert_bases = expert_bases if expert_bases is not None else [0] * num_experts
         assert len(self.expert_bases) == self.num_experts, "Length of expert_bases must be equal to num_experts"
+        self.expert_status = expert_status if expert_status is not None else [0] * num_experts
+        assert len(self.expert_status) == self.num_experts, "Length of expert_status must be equal to num_experts"
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.norm_topk_prob = norm_topk_prob
@@ -333,8 +339,28 @@ class FlexMoREExperts(nn.ModuleList):
         return final_hidden_states
 
 
-class FlexMoRETopKRouter(OlmoeTopKRouter):
-    pass
+class FlexMoRETopKRouter(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.top_k = config.num_experts_per_tok
+        self.num_experts = config.num_experts
+        self.norm_topk_prob = config.norm_topk_prob
+        self.hidden_dim = config.hidden_size
+        self.expert_status = torch.tensor(config.expert_status)
+        self.weight = nn.Parameter(torch.zeros(self.num_experts, self.hidden_dim))
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states.reshape(-1, self.hidden_dim)
+        router_logits = hidden_states @ self.weight.T  # (seq_len, num_experts)
+        router_logits = torch.nn.functional.softmax(router_logits, dtype=torch.float, dim=-1)
+        activated_router_logits = router_logits + float('inf') * self.expert_status.to(router_logits.dtype)
+        _, router_indices = torch.topk(activated_router_logits, self.top_k, dim=-1)  # (seq_len, top_k)
+        router_top_value = torch.gather(router_logits, dim=-1, index=router_indices)
+        if self.norm_topk_prob:
+            router_top_value /= router_top_value.sum(dim=-1, keepdim=True)
+        router_top_value = router_top_value.to(router_logits.dtype)
+        router_scores = router_top_value
+        return router_logits, router_scores, router_indices
 
 
 class FlexMoRESparseMoeBlock(nn.Module):
